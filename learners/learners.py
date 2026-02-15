@@ -37,18 +37,6 @@ class BasicLearner:
                  device: str='cpu'
                  ) -> None:
 
-
-        """
-        agent_policy_mapping: dict[int, str] example ({
-            'agent_1': 'policy_1',
-            'agent_2': 'policy_2',
-            'agent_3': 'policy_1',
-            'agent_4': 'policy_1',
-            ...
-        })
-
-        """
-
         assert rollout_len % data_batch_size == 0, "Batch size must be divisible by train loader batch size"
         assert rollout_len >= data_batch_size, "Batch size must be smaller than train loader batch size"
 
