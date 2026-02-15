@@ -6,7 +6,7 @@ from algorithms.MAPPO import MAPPO
 from envs import Environment
 from models.policies import BasePolicy
 from algorithms.RLAlgorithm import RLAlgorithm
-from utils.RolloutBuffer import RolloutBuffer
+from utils.buffers import RolloutBuffer
 from utils.loggers import MetricsStore
 
 import torch
@@ -23,7 +23,6 @@ class BasicLearner:
                  agent_policy_mapping: dict,
                  action_dim: int,
                  obs_dim: int,
-                 episodes: int,
                  rollout_len:int,
                  data_batch_size: int,
                  X_train: np.ndarray,
@@ -58,7 +57,6 @@ class BasicLearner:
         self.agent_policy_mapping = agent_policy_mapping
         self.n_agents = len(agent_policy_mapping)
         self.env = env
-        self.episodes = episodes
         self.rollouts = rollout_len
         self.action_dim = action_dim
         self.batch_size = data_batch_size
@@ -97,7 +95,6 @@ class BasicLearner:
         self.lr_history = {policy_id: {} for policy_id in self.policies.keys()}
 
         self.metrics = MetricsStore()
-        self.metrics.set_metadata("episodes", episodes)
         self.metrics.set_metadata("gamma", gamma)
         self.metrics.set_metadata("gae_lambda", gae_lambda)
 
@@ -195,7 +192,7 @@ class BasicLearner:
                 current_lrs[policy_id][scheduler_type] = scheduler.get_lr()
         return current_lrs
 
-    def train(self):
+    def train(self, episodes: int=5000):
 
         best_val_acc = 0
 
@@ -208,7 +205,7 @@ class BasicLearner:
             policy.set_training_mode(True)
         self.env.set_deterministic(False)
 
-        for episode in range(self.episodes):
+        for episode in range(episodes):
 
             self.__collect_trajectories()
 
@@ -379,8 +376,6 @@ class BasicLearner:
             self.metrics.log("test_messages", all_actions)
 
 
-
-
 class MAPPOLearner(BasicLearner):
 
     def __init__(self,
@@ -390,7 +385,6 @@ class MAPPOLearner(BasicLearner):
                  agent_policy_mapping: dict,
                  action_dim: int,
                  obs_dim: int,
-                 episodes: int,
                  rollout_len: int,
                  data_batch_size: int,
                  X_train: np.ndarray,
@@ -407,7 +401,7 @@ class MAPPOLearner(BasicLearner):
                  ):
 
         super(MAPPOLearner, self).__init__(env, algorithm, policies, agent_policy_mapping, action_dim, obs_dim,
-                                           episodes, rollout_len, data_batch_size, X_train, y_train, val_loader,
+                                           rollout_len, data_batch_size, X_train, y_train, val_loader,
                                            test_loader, gamma, gae_lambda, critic_obs_dim,
                                            lr_scheduler_config, verbose, device)
 
