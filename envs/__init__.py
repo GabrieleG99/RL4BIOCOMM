@@ -1,1 +1,1 @@
-from .environments import Environment
+from .environments import VectorizedEnvironment, Environment
