@@ -117,11 +117,11 @@ class MAPPO(RLAlgorithm):
                 surr1 = ratios * mb_advantages
                 surr2 = torch.clamp(ratios, 1 - self.eps_clip, 1 + self.eps_clip) * mb_advantages
 
-                ppo_loss = -torch.min(surr1, surr2).mean()
+                ppo_loss = torch.min(surr1, surr2).mean()
 
                 # Usa il coefficiente entropy corrente dallo scheduler
-                ent_loss = -self.c2 * entropies.mean()
-                loss = ppo_loss + ent_loss
+                ent_loss = self.c2 * entropies.mean()
+                loss = -(ppo_loss + ent_loss)
 
                 with torch.no_grad():
                     diff_logprob = log_probs - old_logprobs[:, mb_indices]
