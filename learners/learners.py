@@ -363,6 +363,14 @@ class BasicLearner:
             self.metrics.log("test_acc", accuracy)
             self.metrics.log("test_messages", all_actions)
 
+    def load_best_policies(self):
+
+        for pid, p in self.policies.items():
+
+            p.load_state_dict(self.best_policies[pid])
+
+        return self.best_policies
+
 
 class MAPPOLearner(BasicLearner):
 

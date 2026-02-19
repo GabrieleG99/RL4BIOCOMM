@@ -20,7 +20,6 @@ class MAPPO(RLAlgorithm):
                  epochs=4,
                  target_kl=0.01,
                  std_advantages=True,
-                 use_popart: bool = False,
                  device='cpu'):
 
         super(MAPPO, self).__init__(
@@ -36,7 +35,6 @@ class MAPPO(RLAlgorithm):
         self.target_kl = target_kl
         self.std_advantages = std_advantages
         self.mini_batch_size = mini_batch_size
-        self._use_popart = use_popart
 
         self.avg_surr_loss = []
 
@@ -102,7 +100,7 @@ class MAPPO(RLAlgorithm):
                     old_v = old_state_values[:, mb_indices]
                     state_values = old_v + torch.clamp(state_values - old_v, -self.v_clip, self.v_clip)
 
-                if self._use_popart:
+                if policy_net.use_popart:
                     policy_net.critic_head.update(returns[:, mb_indices])
                     norm_returns = policy_net.critic_head.normalize(returns[:, mb_indices])
                     critic_loss = mse_loss(norm_returns, state_values)
