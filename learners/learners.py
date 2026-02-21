@@ -14,6 +14,22 @@ import torch
 from utils.schedulers import LearningRateScheduler, LinearDecaySchedule, ExponentialDecaySchedule, EntropyScheduler
 
 
+def _create_schedule_from_config(config):
+    """Crea schedule da configurazione."""
+    scheduler_type = config.get('type', 'linear')
+    initial_value = config.get('initial_value', 3e-4)
+    final_value = config.get('final_value', 1e-6)
+    total_steps = config.get('total_steps', 1000)
+
+    if scheduler_type == 'linear':
+        return LinearDecaySchedule(initial_value, final_value, total_steps)
+    elif scheduler_type == 'exp':
+        decay_rate = config.get('decay_rate', None)
+        return ExponentialDecaySchedule(initial_value, final_value, total_steps, decay_rate)
+    else:
+        raise ValueError(f"Unsupported scheduler type: {scheduler_type}")
+
+
 class BasicLearner:
 
     def __init__(self,
@@ -107,20 +123,20 @@ class BasicLearner:
                 # Configurazione separata
                 if 'actor' in pol_config:
                     actor_config = pol_config['actor']
-                    actor_schedule = self._create_schedule_from_config(actor_config)
+                    actor_schedule = _create_schedule_from_config(actor_config)
                     policy_schedulers['actor'] = LearningRateScheduler(
                         policy_net.actor_optimizer, actor_schedule
                     )
 
                 if 'critic' in pol_config:
                     critic_config = pol_config['critic']
-                    critic_schedule = self._create_schedule_from_config(critic_config)
+                    critic_schedule = _create_schedule_from_config(critic_config)
                     policy_schedulers['critic'] = LearningRateScheduler(
                         policy_net.critic_optimizer, critic_schedule
                     )
             else:
                 # Configurazione unificata (applica a tutti gli ottimizzatori)
-                schedule = self._create_schedule_from_config(pol_config)
+                schedule = _create_schedule_from_config(pol_config)
 
                 if hasattr(policy_net, 'actor_optimizer'):
                     policy_schedulers['actor'] = LearningRateScheduler(
@@ -141,21 +157,6 @@ class BasicLearner:
             lr_schedulers[policy_id] = policy_schedulers
 
         return lr_schedulers
-
-    def _create_schedule_from_config(self, config):
-        """Crea schedule da configurazione."""
-        scheduler_type = config.get('type', 'linear')
-        initial_value = config.get('initial_value', 3e-4)
-        final_value = config.get('final_value', 1e-6)
-        total_steps = config.get('total_steps', 1000)
-
-        if scheduler_type == 'linear':
-            return LinearDecaySchedule(initial_value, final_value, total_steps)
-        elif scheduler_type == 'exp':
-            decay_rate = config.get('decay_rate', None)
-            return ExponentialDecaySchedule(initial_value, final_value, total_steps, decay_rate)
-        else:
-            raise ValueError(f"Unsupported scheduler type: {scheduler_type}")
 
     def _step_lr_schedulers(self):
         """
@@ -180,7 +181,7 @@ class BasicLearner:
                 current_lrs[policy_id][scheduler_type] = scheduler.get_lr()
         return current_lrs
 
-    def train(self, episodes: int=5000):
+    def train(self, epochs: int=5000):
 
         best_val_acc = 0
 
@@ -193,7 +194,7 @@ class BasicLearner:
             policy.set_training_mode(True)
         self.env.set_deterministic(False)
 
-        for episode in range(episodes):
+        for episode in range(epochs):
 
             self.__collect_trajectories()
 
@@ -372,6 +373,19 @@ class BasicLearner:
         return self.best_policies
 
 
+def _create_entropy_scheduler(config):
+
+    """
+    Crea scheduler per entropy coefficient.
+    """
+    if config is None:
+        return None
+
+    schedule = _create_schedule_from_config(config)
+
+    return EntropyScheduler(schedule)
+
+
 class MAPPOLearner(BasicLearner):
 
     def __init__(self,
@@ -403,21 +417,9 @@ class MAPPOLearner(BasicLearner):
 
         assert isinstance(algorithm, MAPPO), "MAPPOLearner only support MAPPO algorithm"
 
-        self.entropy_scheduler = self._create_entropy_scheduler(entropy_scheduler_config)
+        self.entropy_scheduler = _create_entropy_scheduler(entropy_scheduler_config)
         self.current_entropy_coeff = self.algorithm.c2
         self.entropy_coeff_history = []
-
-    def _create_entropy_scheduler(self, config):
-
-        """
-        Crea scheduler per entropy coefficient.
-        """
-        if config is None:
-            return None
-
-        schedule = self._create_schedule_from_config(config)
-
-        return EntropyScheduler(schedule)
 
     def _step_schedulers(self):
         super()._step_schedulers()
