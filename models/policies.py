@@ -1,8 +1,6 @@
 from abc import ABC, abstractmethod
 from typing import Any, Optional, TypeVar, Union, Dict
 
-from stable_baselines3.common.utils import get_device
-
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -16,6 +14,14 @@ from dists.distributions import MultiCategoricalDistribution, DictDistribution
 from .popart import PopArt
 
 SelfBasePolicy = TypeVar('SelfBasePolicy', bound='BasePolicy')
+
+
+def get_device(device: Union[torch.device, str] = 'auto') -> torch.device:
+    if isinstance(device, torch.device):
+        return device
+    if device == 'auto':
+        return torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    return torch.device(device)
 
 
 class BasePolicy(nn.Module, ABC):
@@ -569,6 +575,5 @@ class DictActorCriticPolicy(ActorCriticPolicy):
 
 
         
-
 
 

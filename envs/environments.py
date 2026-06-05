@@ -395,7 +395,7 @@ class Environment:
         # Shape: (n_agents, n_agents, 1, 1)
         agents_idx = np.arange(n_agents)
         msg_select_mask = (agents_idx[:, np.newaxis] != agents_idx[np.newaxis, :])
-        msg_select_mask = msg_select_mask.reshape(n_agents, n_agents, 1, 1)
+        msg_select_mask = msg_select_mask.reshape(n_agents, n_agents, 1)
 
         # Expand messages for all receiving agents
         # Shape: (n_agents, n_agents, batch_size, message_dim)
@@ -469,8 +469,6 @@ class Environment:
         self.iter_count = 0
         self.label = new_label
         self.episode_input = new_input
-        batch_size = new_input.shape[0]
-
         with torch.no_grad():
             if isinstance(new_input, np.ndarray):
                 new_input = torch.from_numpy(new_input).float().to(self.device)
@@ -483,8 +481,8 @@ class Environment:
 
         if self.shared_obs:
             shared_obs = np.concatenate(
-                [observations.swapaxes(0,1).reshape(batch_size, -1),
-                 self.agents_dis.flatten()[np.newaxis, :].repeat(batch_size, axis=0)]
+                [observations,
+                 self.agents_dis.flatten()]
                 , axis=-1
             )
             infos['shared_obs'] = shared_obs
@@ -534,7 +532,7 @@ class Environment:
         during intermediate message passing iterations.
         
         Args:
-            actions: Array containing actions from all agents with shape (n_agents, batch_size, action_dim)
+            actions: Array containing actions from all agents with shape (n_agents, action_dim)
             
         Returns:
             tuple: Contains:

@@ -239,15 +239,15 @@ class BasicLearner:
 
         while count < self.rollouts:
 
-            data_batch_indices = np.random.choice(len(self.X_train), self.batch_size)
-            X_batch, y_batch = self.X_train[data_batch_indices], self.y_train[data_batch_indices]
+            data_index = np.random.choice(len(self.X_train))
+            X, y = self.X_train[data_index], self.y_train[data_index]
 
-            obs, infos = self.env.reset(X_batch, y_batch)
-            dones = np.zeros(self.n_agents, dtype=bool)
+            obs, infos = self.env.reset(X, y)
+            done = False
 
-            while not np.all(dones) and count < self.rollouts:
+            while not done and count < self.rollouts:
 
-                actions_array = np.zeros((self.n_agents, self.batch_size, self.action_dim), dtype=np.float32)
+                actions_array = np.zeros((self.n_agents, self.action_dim), dtype=np.float32)
 
                 for policy_id, policy in self.policies.items():
                     agent_ids = self.policy_agent_mapping[policy_id]
