@@ -7,19 +7,33 @@ class RolloutBuffer:
 
         #self.total_rollout_iters = rollout_len // (batch_size * n_iters) * n_iters
         self.total_rollout_iters = math.ceil(rollout_len / batch_size)
+        #
+        # self.actions = np.zeros((batch_size, self.total_rollout_iters, action_space))
+        # self.states = np.zeros((batch_size, self.total_rollout_iters, observation_space))
+        # self.logprobs = np.zeros((batch_size, self.total_rollout_iters, 1)) #action_space))
+        # self.rewards = np.zeros((batch_size, self.total_rollout_iters,))
+        # self.state_values = np.zeros((batch_size, self.total_rollout_iters, 1))
+        # self.is_terminals = np.zeros((batch_size, self.total_rollout_iters,))
+        #
+        # if shared_space is not None:
+        #     self.crit_state = np.zeros((batch_size, self.total_rollout_iters, shared_space))
+        #     self.crit_space = shared_space
+        # else:
+        #     self.crit_state = np.zeros((batch_size, self.total_rollout_iters, observation_space))
+        #     self.crit_space = observation_space
 
-        self.actions = np.zeros((batch_size, self.total_rollout_iters, action_space))
-        self.states = np.zeros((batch_size, self.total_rollout_iters, observation_space))
-        self.logprobs = np.zeros((batch_size, self.total_rollout_iters, 1)) #action_space))
-        self.rewards = np.zeros((batch_size, self.total_rollout_iters,))
-        self.state_values = np.zeros((batch_size, self.total_rollout_iters, 1))
-        self.is_terminals = np.zeros((batch_size, self.total_rollout_iters,))
+        self.actions = np.zeros((rollout_len, action_space))
+        self.states = np.zeros((rollout_len, observation_space))
+        self.logprobs = np.zeros((rollout_len, 1))  # action_space))
+        self.rewards = np.zeros((rollout_len,))
+        self.state_values = np.zeros((rollout_len, 1))
+        self.is_terminals = np.zeros((rollout_len,))
 
         if shared_space is not None:
-            self.crit_state = np.zeros((batch_size, self.total_rollout_iters, shared_space))
+            self.crit_state = np.zeros((rollout_len, shared_space))
             self.crit_space = shared_space
         else:
-            self.crit_state = np.zeros((batch_size, self.total_rollout_iters, observation_space))
+            self.crit_state = np.zeros((rollout_len, observation_space))
             self.crit_space = observation_space
 
         self.gamma = gamma
@@ -80,7 +94,6 @@ class RolloutBuffer:
         # We work backwards from the end of the buffer
         for t in reversed(range(T)):
             if t == T - 1:
-                # This is the crucial 'bootstrapping' step
                 next_v = bootstrap_value.flatten()
             else:
                 next_v = self.state_values[:, t + 1].flatten()
