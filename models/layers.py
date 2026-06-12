@@ -61,7 +61,7 @@ class BaseNN(nn.Module):
 
 class FeedForwardNN(BaseNN):
 
-    def __init__(self, input_size, hidden_size, output_size, dropout_rate=0.0, use_batchnorm=False, activation='relu'):
+    def __init__(self, input_size, output_size, hidden_size: list=[], dropout_rate=0.0, use_batchnorm=False, activation='relu'):
         super(FeedForwardNN, self).__init__(input_size, hidden_size, output_size, dropout_rate, use_batchnorm, activation=activation)
 
         layers = []

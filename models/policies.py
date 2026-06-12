@@ -257,14 +257,14 @@ class ActorCriticPolicy(BasePolicy):
 
     def _create_actor_head(self):
         """Create the actor head."""
-        self.actor_head = FeedForwardNN(self.act_features_extractor.output_size, self.net_arch['pi'], self.output_size, activation=self.activation)
+        self.actor_head = FeedForwardNN(self.act_features_extractor.output_size, self.output_size, self.net_arch['pi'], activation=self.activation)
 
     def _create_critic_head(self):
         """Create the critic head."""
         if self.use_popart:
             self.critic_head = PopArt(self.critic_features_extractor.output_size, 1, device=self.device)
         else:
-            self.critic_head = FeedForwardNN(self.critic_features_extractor.output_size, self.net_arch['vf'], 1, activation=self.activation)
+            self.critic_head = FeedForwardNN(self.critic_features_extractor.output_size, 1, self.net_arch['vf'], activation=self.activation)
 
     def _get_constructor_parameters(self) -> dict[str, Any]:
         """

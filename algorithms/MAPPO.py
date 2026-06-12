@@ -1,6 +1,6 @@
 from matplotlib import pyplot as plt
+import gymnasium.spaces as spaces
 import torch
-from torch.nn.functional import mse_loss
 
 from algorithms.RLAlgorithm import RLAlgorithm
 
@@ -37,6 +37,38 @@ class MAPPO(RLAlgorithm):
         self.mini_batch_size = mini_batch_size
 
         self.avg_surr_loss = []
+
+    @staticmethod
+    def _joint_distribution_value(values: torch.Tensor, policy_net) -> torch.Tensor:
+        if isinstance(policy_net.action_space, spaces.Box) and values.dim() > 0 and values.shape[-1] != 1:
+            return values.sum(dim=-1, keepdim=True)
+        if values.dim() == 0:
+            return values.reshape(1, 1)
+        if values.dim() >= 3 and values.shape[-1] == 1:
+            return values
+        return values.unsqueeze(-1)
+
+    def _critic_loss(self, state_values, old_state_values, returns, policy_net):
+        if policy_net.use_popart:
+            policy_net.critic_head.update(returns)
+            target_returns = policy_net.critic_head.normalize(returns)
+            old_values = policy_net.critic_head.normalize(old_state_values)
+        else:
+            target_returns = returns
+            old_values = old_state_values
+
+        value_loss = (state_values - target_returns).pow(2)
+
+        if self.v_clip is None:
+            return value_loss.mean()
+
+        clipped_values = old_values + torch.clamp(
+            state_values - old_values,
+            -self.v_clip,
+            self.v_clip,
+        )
+        clipped_value_loss = (clipped_values - target_returns).pow(2)
+        return torch.max(value_loss, clipped_value_loss).mean()
 
     def update(self, policy_id, policy_net, history_buffers, next_value):
 
@@ -82,6 +114,7 @@ class MAPPO(RLAlgorithm):
         n_samples = advantages.shape[1]
 
         continue_training = True
+        update_count = 0
 
         for epoch in range(self.epochs):
             if not continue_training:
@@ -95,20 +128,24 @@ class MAPPO(RLAlgorithm):
                 mb_advantages = advantages[:, mb_indices]
 
                 state_values = policy_net.evaluate_critic(old_critic_states[:, mb_indices])
+                critic_loss = self._critic_loss(
+                    state_values,
+                    old_state_values[:, mb_indices],
+                    returns[:, mb_indices],
+                    policy_net,
+                )
 
-                if self.v_clip is not None:
-                    old_v = old_state_values[:, mb_indices]
-                    state_values = old_v + torch.clamp(state_values - old_v, -self.v_clip, self.v_clip)
-
-                if policy_net.use_popart:
-                    policy_net.critic_head.update(returns[:, mb_indices])
-                    norm_returns = policy_net.critic_head.normalize(returns[:, mb_indices])
-                    critic_loss = mse_loss(norm_returns, state_values)
-                else:
-                    critic_loss = mse_loss(returns[:, mb_indices], state_values)
+                policy_net.critic_optimizer.zero_grad()
+                (critic_loss * self.c1).backward()
+                torch.nn.utils.clip_grad_norm_(
+                    policy_net.critic_features_extractor.parameters(), max_norm=self.max_grad_norm)
+                torch.nn.utils.clip_grad_norm_(policy_net.critic_head.parameters(), max_norm=self.max_grad_norm)
+                policy_net.critic_optimizer.step()
 
                 log_probs, entropies = policy_net.evaluate(old_states[:, mb_indices],
                                                            old_actions[:, mb_indices])
+                log_probs = self._joint_distribution_value(log_probs, policy_net)
+                entropies = self._joint_distribution_value(entropies, policy_net)
 
                 ratios = torch.exp(log_probs - old_logprobs[:, mb_indices])
 
@@ -134,6 +171,7 @@ class MAPPO(RLAlgorithm):
                 policy_entropy += entropies.mean().item()
                 avg_epoch_critic_loss += critic_loss.item()
                 avg_epoch_surr_loss += ppo_loss.item()
+                update_count += 1
 
                 policy_net.actor_optimizer.zero_grad()
                 loss.backward()
@@ -142,26 +180,16 @@ class MAPPO(RLAlgorithm):
                 torch.nn.utils.clip_grad_norm_(policy_net.actor_head.parameters(), max_norm=self.max_grad_norm)
                 policy_net.actor_optimizer.step()
 
-                policy_net.critic_optimizer.zero_grad()
-                (critic_loss * self.c1).backward()
-                torch.nn.utils.clip_grad_norm_(
-                    policy_net.critic_features_extractor.parameters(), max_norm=self.max_grad_norm)
-                torch.nn.utils.clip_grad_norm_(policy_net.critic_head.parameters(), max_norm=self.max_grad_norm)
-                policy_net.critic_optimizer.step()
-
                 # policy_net.optimizer.zero_grad()
                 # loss.backward()
                 # torch.nn.utils.clip_grad_norm_(policy_net.parameters(), max_norm=self.max_grad_norm)
                 # policy_net.optimizer.step()
 
-        num_updates = self.epochs * (
-                    n_samples // self.mini_batch_size) if n_samples > self.mini_batch_size else self.epochs
-
-        if num_updates > 0:
-            avg_epoch_surr_loss /= num_updates
-            avg_epoch_critic_loss /= num_updates
-            policy_loss /= num_updates
-            policy_entropy /= num_updates
+        if update_count > 0:
+            avg_epoch_surr_loss /= update_count
+            avg_epoch_critic_loss /= update_count
+            policy_loss /= update_count
+            policy_entropy /= update_count
 
             metrics = {
                 "loss": policy_loss,
@@ -209,7 +237,5 @@ class MAPPO(RLAlgorithm):
         super().metrics_clear()
         self.entropy_coeff_history = []
         self.avg_surr_loss = [[] for _ in range(len(self.policies))]
-
-
 
 

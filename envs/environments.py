@@ -1,13 +1,14 @@
 import gymnasium as gym
 from matplotlib import pyplot as plt
 
-from typing import Dict, Union, Optional
+from typing import Dict, Optional, Sequence, Tuple, Union
 import scipy
 
 import torch
 
 import numpy as np
 
+from models.Agent import Agent
 from models.layers import BaseNN
 
 IDS = {
@@ -19,18 +20,20 @@ IDS = {
 
 class Environment:
     def __init__(self,
-                 agents,
+                 agents: Sequence[Agent],
                  policy_action_space: Dict[str, gym.Space],
                  policy_obs_space: Dict[str, gym.Space],
-                 space_shape=(5, 5),
-                 n_iters=3,
-                 mol_types=1,
+                 space_shape: Tuple[int, int]=(5, 5),
+                 n_iters: int=3,
+                 mol_types: int=1,
                  noisy: bool =True,
                  shared_obs: bool=False,
                  sr_choice: str="furthest",
                  is_continuous: bool=False,
                  encoder: Optional[BaseNN]=None,
                  decoder: Optional[BaseNN]=None,
+                 X_train: Optional[np.ndarray]=None,
+                 y_train: Optional[np.ndarray]=None,
                  device: str='cpu',
                  max_step_count: int=30,
                  seed: int=42):
@@ -65,6 +68,8 @@ class Environment:
         self.noisy = noisy
         self.encoder: BaseNN = encoder
         self.decoder: BaseNN = decoder
+        self.X_train = X_train
+        self.y_train = y_train
         self.next_obs = None
         self.space_shape = np.array(space_shape, dtype=np.int32)
         self.sender = None
@@ -395,7 +400,7 @@ class Environment:
         # Shape: (n_agents, n_agents, 1, 1)
         agents_idx = np.arange(n_agents)
         msg_select_mask = (agents_idx[:, np.newaxis] != agents_idx[np.newaxis, :])
-        msg_select_mask = msg_select_mask.reshape(n_agents, n_agents, 1, 1)
+        msg_select_mask = msg_select_mask.reshape(n_agents, n_agents, 1)
 
         # Expand messages for all receiving agents
         # Shape: (n_agents, n_agents, batch_size, message_dim)
@@ -404,10 +409,10 @@ class Environment:
 
         if self.noisy:
             # Calculate reception probabilities for all agents
-            # Shape: (n_agents, n_agents, 1, 1)
+            # Shape: (n_agents, n_agents, 1)
             dists = self.agents_dis  # Shape: (n_agents, n_agents)
             probs = scipy.special.erfc(dists / 2.0)
-            probs = probs[..., np.newaxis, np.newaxis]
+            probs = probs[..., np.newaxis]
 
             # Apply probabilistic scaling to all messages
             # Shape: (n_agents, n_agents, batch_size, message_dim)
@@ -446,7 +451,9 @@ class Environment:
                 obs[agent_key] = np.zeros(self.mol_types, dtype=np.float32)
         return obs
 
-    def reset(self, new_input: Union[np.ndarray, torch.Tensor], new_label: Union[np.ndarray, torch.Tensor]):
+    def reset(self,
+              new_input: Optional[Union[np.ndarray, torch.Tensor]]=None,
+              new_label: Optional[Union[np.ndarray, torch.Tensor, int]]=None) -> Tuple[np.ndarray, Dict]:
         """
         Reset the environment with new input data and labels.
         
@@ -467,14 +474,29 @@ class Environment:
         """
         self.step_count = 1
         self.iter_count = 0
-        self.label = new_label
-        self.episode_input = new_input
-        batch_size = new_input.shape[0]
+
+        if new_input is None or new_label is None:
+            if self.X_train is None or self.y_train is None:
+                raise ValueError("X_train and y_train must be set when reset() is called without data")
+            sample = self.rng.choice(self.X_train.shape[0])
+            self.label = self.y_train[sample]
+            self.episode_input = self.X_train[sample]
+        else:
+            self.label = new_label.detach().cpu().numpy() if isinstance(new_label, torch.Tensor) else new_label
+            self.episode_input = new_input.detach().cpu().numpy() if isinstance(new_input, torch.Tensor) else new_input
+
+        new_input = self.episode_input
 
         with torch.no_grad():
+            squeeze_sender_obs = False
             if isinstance(new_input, np.ndarray):
                 new_input = torch.from_numpy(new_input).float().to(self.device)
+            if new_input.dim() == 1:
+                new_input = new_input.unsqueeze(0)
+                squeeze_sender_obs = True
             sender_obs = self.encoder(new_input).detach().cpu().numpy()
+            if squeeze_sender_obs:
+                sender_obs = sender_obs.squeeze(0)
 
         observations = np.zeros((self.n_agents, *sender_obs.shape), dtype=np.float32)
         observations[self.sender] = sender_obs
@@ -483,9 +505,11 @@ class Environment:
 
         if self.shared_obs:
             shared_obs = np.concatenate(
-                [observations.swapaxes(0,1).reshape(batch_size, -1),
-                 self.agents_dis.flatten()[np.newaxis, :].repeat(batch_size, axis=0)]
-                , axis=-1
+                [
+                    observations,
+                    self.agents_dis[np.triu_indices(self.n_agents, k=1)][np.newaxis, :].repeat(self.n_agents, axis=0)
+                ],
+                 axis=-1
             )
             infos['shared_obs'] = shared_obs
 
@@ -569,7 +593,7 @@ class Environment:
             #reward = reward * 0.1
             reward = reward.item() if reward.shape[0] == 1 else reward
 
-        done = np.full((actions[self.sender].shape[0],), False)
+        done = np.full((self.n_agents,), False)
 
         infos = {f"agent_{aid}": {} for aid in range(self.n_agents)}
         infos['__all__'] = {'iters_end': self.iter_count >= self.n_iters}
@@ -588,11 +612,11 @@ class Environment:
 
         infos['__all__']['correct'] = bool(correct.item()) if correct.shape[0] == 1 else correct.astype(bool)
         if self.shared_obs:
-            batch_size = reward.shape[0]
             shared_obs = np.concatenate(
-                [observations.swapaxes(0, 1).reshape(batch_size, -1),
-                 self.agents_dis.flatten()[np.newaxis, :].repeat(batch_size, axis=0)]
-                , axis=-1
+                [observations,
+                 self.agents_dis[np.triu_indices(self.n_agents, k=1)][np.newaxis, :].repeat(self.n_agents, axis=0)
+                ],
+                axis=-1
             )
             infos['shared_obs'] = shared_obs
 
