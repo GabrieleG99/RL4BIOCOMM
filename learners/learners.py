@@ -8,7 +8,7 @@ from algorithms.MAPPO import MAPPO
 from envs import Environment
 from models.policies import BasePolicy
 from algorithms.RLAlgorithm import RLAlgorithm
-from utils.buffers import RolloutBuffer
+from utils.buffers import RolloutBuffer, RecurrentRolloutBuffer
 from utils.loggers import MetricsStore
 
 import torch
@@ -92,11 +92,47 @@ class BasicLearner:
         for agent_id, policy_id in agent_policy_mapping.items():
             self.policy_agent_mapping[policy_id].append(agent_id)
 
-        self.history_buffers = [
-            RolloutBuffer(rollout_len, self.n_envs, action_dim, obs_dim, gae_lambda=gae_lambda, gamma=gamma,
-                          shared_space=critic_obs_dim)
-            for _ in range(self.n_agents)
-        ]
+        self.history_buffers = []
+        for agent_id in range(self.n_agents):
+            policy = self.policies[self.agent_policy_mapping[agent_id]]
+            buffer_kwargs = {
+                "gae_lambda": gae_lambda,
+                "gamma": gamma,
+                "shared_space": critic_obs_dim,
+            }
+            if getattr(policy, "is_recurrent", False):
+                self.history_buffers.append(
+                    RecurrentRolloutBuffer(
+                        rollout_len,
+                        self.n_envs,
+                        action_dim,
+                        obs_dim,
+                        actor_hidden_shape=policy.act_features_extractor.hidden_state_shape,
+                        critic_hidden_shape=policy.critic_features_extractor.hidden_state_shape,
+                        **buffer_kwargs,
+                    )
+                )
+            else:
+                self.history_buffers.append(
+                    RolloutBuffer(
+                        rollout_len,
+                        self.n_envs,
+                        action_dim,
+                        obs_dim,
+                        **buffer_kwargs,
+                    )
+                )
+
+        if (
+                any(getattr(policy, "is_recurrent", False) for policy in self.policies.values())
+                and hasattr(self.algorithm, "sequence_len")
+                and self.algorithm.sequence_len is None
+                and hasattr(self.env, "n_iters")
+        ):
+            n_iters = self.env.n_iters
+            if isinstance(n_iters, (list, tuple, np.ndarray)):
+                n_iters = n_iters[0]
+            self.algorithm.sequence_len = int(n_iters)
 
         self.all_schedulers = []
 
@@ -392,6 +428,9 @@ class BasicLearner:
 
             obs, infos = self.env.reset()
             obs = self._as_env_batch(obs)
+            for policy in self.policies.values():
+                if getattr(policy, "is_recurrent", False):
+                    policy.reset_recurrent_states()
             dones = np.zeros((self.n_agents, self.n_envs), dtype=bool)
 
             while not np.all(dones) and count < self.rollouts:
@@ -401,6 +440,13 @@ class BasicLearner:
                 for policy_id, policy in self.policies.items():
                     agent_ids = self.policy_agent_mapping[policy_id]
                     obs_tensor = torch.from_numpy(obs[agent_ids]).float().to(self.device)
+                    actor_hidden = None
+                    critic_hidden = None
+                    if getattr(policy, "is_recurrent", False):
+                        recurrent_batch_size = len(agent_ids) * self.n_envs
+                        actor_hidden = policy.get_actor_hidden(recurrent_batch_size)
+                        critic_hidden = policy.get_critic_hidden(recurrent_batch_size)
+
                     with torch.no_grad():
                         action_tensor, log_prob = policy(obs_tensor)
                         log_prob = self._policy_logprob(policy, log_prob)
@@ -412,16 +458,45 @@ class BasicLearner:
 
                         value = policy.get_state_value(critic_input)
 
-                    for i, agent_id in enumerate(agent_ids):
-                        self.history_buffers[agent_id].add(
-                            action=action_tensor[i].cpu().numpy(),
-                            state=obs_tensor[i].cpu().numpy(),
-                            logprob=log_prob[i].cpu().numpy(),
-                            crit_state=critic_input[i].cpu().numpy(),
-                            state_value=value[i].cpu().numpy(),
-                            perform_step=False,
+                    action_np = action_tensor.detach().cpu().numpy()
+                    state_np = obs_tensor.detach().cpu().numpy()
+                    logprob_np = log_prob.detach().cpu().numpy()
+                    critic_np = critic_input.detach().cpu().numpy()
+                    value_np = value.detach().cpu().numpy()
+
+                    if getattr(policy, "is_recurrent", False):
+                        actor_hidden_np = actor_hidden.detach().cpu().numpy()
+                        critic_hidden_np = critic_hidden.detach().cpu().numpy()
+                        actor_hidden_np = actor_hidden_np.reshape(
+                            actor_hidden_np.shape[0],
+                            len(agent_ids),
+                            self.n_envs,
+                            actor_hidden_np.shape[-1],
                         )
-                    actions_array[agent_ids, :] = action_tensor.cpu().numpy()
+                        critic_hidden_np = critic_hidden_np.reshape(
+                            critic_hidden_np.shape[0],
+                            len(agent_ids),
+                            self.n_envs,
+                            critic_hidden_np.shape[-1],
+                        )
+
+                    for i, agent_id in enumerate(agent_ids):
+                        transition = {
+                            "action": action_np[i],
+                            "state": state_np[i],
+                            "logprob": logprob_np[i],
+                            "crit_state": critic_np[i],
+                            "state_value": value_np[i],
+                            "perform_step": False,
+                        }
+
+                        if getattr(policy, "is_recurrent", False):
+                            transition["actor_hidden"] = np.transpose(actor_hidden_np[:, i], (1, 0, 2))
+                            transition["critic_hidden"] = np.transpose(critic_hidden_np[:, i], (1, 0, 2))
+
+                        self.history_buffers[agent_id].add(**transition)
+
+                    actions_array[agent_ids, :] = action_np
 
                 next_obs, rewards, dones, infos = self.env.step(self._step_actions(actions_array))
                 next_obs = self._as_env_batch(next_obs)
@@ -433,6 +508,10 @@ class BasicLearner:
                         rewards=rewards['agent_'+str(aid)],
                         is_terminals=dones[aid]
                     )
+
+                for policy_id, policy in self.policies.items():
+                    if getattr(policy, "is_recurrent", False):
+                        policy.reset_recurrent_states(dones[self.policy_agent_mapping[policy_id]])
 
                 with torch.no_grad():
                     if 'shared_obs' in infos:
@@ -496,6 +575,9 @@ class BasicLearner:
 
                     obs, infos = self.env.reset(X_eval, y_eval)
                     obs = self._as_env_batch(obs)
+                    for policy in self.policies.values():
+                        if getattr(policy, "is_recurrent", False):
+                            policy.reset_recurrent_states()
 
                     dones = np.zeros((self.n_agents, self.n_envs), dtype=bool)
                     step_count = 0
@@ -511,6 +593,9 @@ class BasicLearner:
                         obs, rewards, dones, infos = self.env.step(self._step_actions(actions_array))
                         obs = self._as_env_batch(obs)
                         dones = self._as_agent_env_done(dones.get('__all__', False))
+                        for pid, policy in self.policies.items():
+                            if getattr(policy, "is_recurrent", False):
+                                policy.reset_recurrent_states(dones[self.policy_agent_mapping[pid]])
                         all_actions[step_count, :, start:end, :] = actions_array[:, :valid_envs, :]
                         step_count += 1
 

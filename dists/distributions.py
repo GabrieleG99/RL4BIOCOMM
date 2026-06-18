@@ -7,7 +7,7 @@ from gymnasium.spaces import MultiDiscrete
 class MultiCategoricalDistribution(Distribution):
 
     def __init__(self, logits, action_space: MultiDiscrete):
-        super(MultiCategoricalDistribution, self).__init__()
+        super(MultiCategoricalDistribution, self).__init__(validate_args=False)
         self.logits = logits
         if action_space.nvec.sum() != logits.shape[-1]:
             raise ValueError(f"Logits shape {logits.shape[-1]} does not match action space dimensions {action_space.nvec.sum()}.")

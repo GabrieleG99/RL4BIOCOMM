@@ -1,4 +1,4 @@
-from typing import Union
+from typing import Union, List
 
 import torch.nn as nn
 import torch
@@ -18,7 +18,12 @@ class BaseNN(nn.Module):
         'none': nn.Identity()
     }
 
-    def __init__(self, input_size, hidden_size, output_size, dropout_rate=0.0, use_batchnorm=False, activation='relu'):
+    def __init__(self, input_size: int,
+                 hidden_size: Union[int, List[int]],
+                 output_size: int,
+                 dropout_rate: float=0.0,
+                 use_batchnorm: bool=False,
+                 activation='relu'):
         super(BaseNN, self).__init__()
         self.input_size = input_size
         self.hidden_size = hidden_size
@@ -61,11 +66,13 @@ class BaseNN(nn.Module):
 
 class FeedForwardNN(BaseNN):
 
-    def __init__(self, input_size, output_size, hidden_size: list=[], dropout_rate=0.0, use_batchnorm=False, activation='relu'):
+    def __init__(self, input_size, output_size, hidden_size=[], dropout_rate=0.0, use_batchnorm=False, activation='relu'):
         super(FeedForwardNN, self).__init__(input_size, hidden_size, output_size, dropout_rate, use_batchnorm, activation=activation)
 
         layers = []
         previous_dim = input_size
+        if isinstance(hidden_size, int):
+            hidden_size = [hidden_size]
         for h in hidden_size:
             layers.append(nn.Linear(previous_dim, h))
             if use_batchnorm:
@@ -82,24 +89,36 @@ class FeedForwardNN(BaseNN):
 
 class RecurrentNN(BaseNN):
 
-    def __init__(self, input_size, hidden_size, output_size, dropout_rate=0.0, use_batchnorm=False, activation='relu'):
+    def __init__(self,
+                 input_size,
+                 hidden_size,
+                 output_size,
+                 dropout_rate=0.0,
+                 use_batchnorm=False,
+                 activation='relu',
+                 bidirectional: bool = False):
+
         super(RecurrentNN, self).__init__(input_size, hidden_size, output_size, dropout_rate, use_batchnorm, activation=activation)
 
-        layers = []
-        previous_dim = input_size
-        for h in hidden_size:
-            layers.append(nn.LSTM(previous_dim, h, batch_first=True))
-            if use_batchnorm:
-                layers.append(nn.BatchNorm1d(h))
-            layers.append(self.activations[activation])
-            layers.append(nn.Dropout(p=dropout_rate))
-            previous_dim = h
-        layers.append(nn.LSTM(previous_dim, output_size, batch_first=True))
-        self.network = nn.Sequential(*layers)
+        assert isinstance(hidden_size, int), "hidden_size must be an integer"
+        self.network = nn.GRU(input_size, hidden_size, batch_first=True, dropout=dropout_rate, bidirectional=bidirectional)
+        self.head = nn.Linear(hidden_size * 2 if bidirectional else hidden_size, output_size)
+        self.num_directions = 2 if bidirectional else 1
 
-    def forward(self, x):
-        out, _ = self.network(x)
-        return out
+    @property
+    def hidden_state_shape(self):
+        return self.network.num_layers * self.num_directions, self.hidden_size
+
+    def forward(self, x, h=None):
+
+        if h is None:
+            out, last_h = self.network(x)
+        else:
+            out, last_h = self.network(x, h)
+
+        out = self.head(out)
+
+        return out, last_h
 
 
 class Curiosity(nn.Module):

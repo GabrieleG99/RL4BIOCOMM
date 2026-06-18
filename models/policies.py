@@ -11,7 +11,7 @@ import numpy as np
 
 import gymnasium.spaces as spaces
 
-from .layers import FeedForwardNN, BaseNN
+from .layers import FeedForwardNN, BaseNN, RecurrentNN
 from dists.distributions import MultiCategoricalDistribution, DictDistribution
 from .popart import PopArt
 
@@ -233,6 +233,13 @@ class ActorCriticPolicy(BasePolicy):
 
         self.act_features_extractor = self.make_features_extractor()
 
+        if isinstance(self.act_features_extractor, RecurrentNN):
+            self.is_recurrent = True
+            self.actor_hidden = None
+            self.critic_hidden = None
+        else:
+            self.is_recurrent = False
+
         if shared_critic_input_size is not None:
             self.input_size = shared_critic_input_size
 
@@ -293,6 +300,118 @@ class ActorCriticPolicy(BasePolicy):
             self.critic_optimizer = self.optim_class([{'params': self.critic_head.parameters()},
                                                       {'params': self.critic_features_extractor.parameters()}], **self.critic_optim_kwargs)
 
+    def _zero_recurrent_hidden(self, extractor: RecurrentNN, batch_size: int) -> torch.Tensor:
+        n_layers, hidden_size = extractor.hidden_state_shape
+        return torch.zeros(n_layers, batch_size, hidden_size, device=self.device)
+
+    def _get_recurrent_hidden(self, name: str, extractor: RecurrentNN, batch_size: int) -> torch.Tensor:
+        hidden = getattr(self, name)
+        if hidden is None or hidden.shape[1] != batch_size:
+            return self._zero_recurrent_hidden(extractor, batch_size)
+        return hidden.detach().clone()
+
+    def get_actor_hidden(self, batch_size: int) -> Optional[torch.Tensor]:
+        if not self.is_recurrent:
+            return None
+        return self._get_recurrent_hidden("actor_hidden", self.act_features_extractor, batch_size)
+
+    def get_critic_hidden(self, batch_size: int) -> Optional[torch.Tensor]:
+        if not self.is_recurrent:
+            return None
+        return self._get_recurrent_hidden("critic_hidden", self.critic_features_extractor, batch_size)
+
+    def reset_recurrent_states(self, done_mask: Optional[np.ndarray | torch.Tensor] = None) -> None:
+        if not self.is_recurrent:
+            return
+
+        if done_mask is None:
+            self.actor_hidden = None
+            self.critic_hidden = None
+            return
+
+        done_mask = torch.as_tensor(done_mask, dtype=torch.bool, device=self.device).reshape(-1)
+        for name in ("actor_hidden", "critic_hidden"):
+            hidden = getattr(self, name)
+            if hidden is not None:
+                if done_mask.numel() != hidden.shape[1]:
+                    raise ValueError(
+                        f"done_mask has {done_mask.numel()} entries, expected {hidden.shape[1]}"
+                    )
+                hidden[:, done_mask, :] = 0.0
+
+    def _recurrent_features(
+            self,
+            extractor: RecurrentNN,
+            observation: torch.Tensor,
+            hidden_state: Optional[torch.Tensor],
+            state_name: str,
+            update_hidden: bool,
+            sequence: bool,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if sequence:
+            if observation.dim() != 3:
+                raise ValueError("Recurrent sequence observations must have shape (batch, sequence, features)")
+            recurrent_input = observation
+            batch_shape = observation.shape[:1]
+        else:
+            if observation.dim() != 3:
+                raise ValueError("Recurrent observations must have shape (agents, envs, features)")
+            n_agents, n_envs, obs_dim = observation.shape
+            recurrent_input = observation.reshape(n_agents * n_envs, 1, obs_dim)
+            batch_shape = (n_agents, n_envs)
+
+        batch_size = recurrent_input.shape[0]
+        if hidden_state is None and update_hidden:
+            hidden_state = getattr(self, state_name)
+            if hidden_state is not None and hidden_state.shape[1] != batch_size:
+                hidden_state = None
+
+        features, next_hidden = extractor(recurrent_input, hidden_state)
+
+        if update_hidden:
+            setattr(self, state_name, next_hidden.detach())
+
+        if sequence:
+            return features, next_hidden
+
+        return features.reshape(*batch_shape, -1), next_hidden
+
+    def _actor_features(
+            self,
+            observation: torch.Tensor,
+            hidden_state: Optional[torch.Tensor] = None,
+            update_hidden: bool = False,
+            sequence: bool = False,
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+        if self.is_recurrent:
+            return self._recurrent_features(
+                self.act_features_extractor,
+                observation,
+                hidden_state,
+                "actor_hidden",
+                update_hidden,
+                sequence,
+            )
+        return self.act_features_extractor(observation), None
+
+    def _critic_features(
+            self,
+            observation: torch.Tensor,
+            hidden_state: Optional[torch.Tensor] = None,
+            update_hidden: bool = False,
+            sequence: bool = False,
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+        if self.is_recurrent:
+            return self._recurrent_features(
+                self.critic_features_extractor,
+                observation,
+                hidden_state,
+                "critic_hidden",
+                update_hidden,
+                sequence,
+            )
+        return self.critic_features_extractor(observation), None
+
 
     def _predict(
             self,
@@ -305,7 +424,7 @@ class ActorCriticPolicy(BasePolicy):
         :param deterministic: Whether to use a deterministic policy.
         :return: A tuple containing the action, value, and features (if requested).
         """
-        features = self.act_features_extractor(observation)
+        features, _ = self._actor_features(observation, update_hidden=True)
         logits = self.actor_head(features)
 
         dist  = self._get_prob_dis_from_act_space(logits)
@@ -323,7 +442,7 @@ class ActorCriticPolicy(BasePolicy):
         :param observation: The observation tensor.
         :return: A tuple containing the action, value, and features (if requested).
         """
-        features = self.act_features_extractor(observation)
+        features, _ = self._actor_features(observation, update_hidden=True)
         logits = self.actor_head(features)
         dist = self._get_prob_dis_from_act_space(logits)
 
@@ -332,24 +451,40 @@ class ActorCriticPolicy(BasePolicy):
 
         return actions, logprobs
     
-    def evaluate_critic(self, observation: torch.Tensor) -> torch.Tensor:
+    def evaluate_critic(
+            self,
+            observation: torch.Tensor,
+            hidden_state: Optional[torch.Tensor] = None,
+            sequence: bool = False,
+    ) -> torch.Tensor:
 
         """
         Get the state value for the given observation.
         :param observation: The observation tensor.
         :return: The state value tensor.
         """
-        features = self.critic_features_extractor(observation)
+        features, _ = self._critic_features(observation, hidden_state, sequence=sequence)
         return self.critic_head(features)
     
-    def get_state_value(self, observation: torch.Tensor) -> torch.Tensor:
+    def get_state_value(
+            self,
+            observation: torch.Tensor,
+            hidden_state: Optional[torch.Tensor] = None,
+            sequence: bool = False,
+            update_hidden: bool = True,
+    ) -> torch.Tensor:
 
         """
         Get the state value for the given observation.
         :param observation: The observation tensor.
         :return: The state value tensor.
-        """            
-        features = self.critic_features_extractor(observation)
+        """
+        features, _ = self._critic_features(
+            observation,
+            hidden_state,
+            update_hidden=update_hidden and hidden_state is None,
+            sequence=sequence,
+        )
 
         if self.use_popart:
             values = self.critic_head(features)
@@ -358,17 +493,26 @@ class ActorCriticPolicy(BasePolicy):
             return self.critic_head(features)
 
     
-    def evaluate(self, observation: torch.Tensor, action: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    def evaluate(
+            self,
+            observation: torch.Tensor,
+            action: torch.Tensor,
+            hidden_state: Optional[torch.Tensor] = None,
+            sequence: bool = False,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Evaluate the policy for the given observation and action.
         :param observation: The observation tensor.
         :param action: The action tensor.
         :return: A tuple containing the log probabilities and entropies.
         """
-        features = self.act_features_extractor(observation)
+        features, _ = self._actor_features(observation, hidden_state, sequence=sequence)
         logits = self.actor_head(features)
 
         dist = self._get_prob_dis_from_act_space(logits)
+
+        if isinstance(self.action_space, (spaces.Discrete, spaces.MultiDiscrete)):
+            action = action.long()
 
         log_probs = dist.log_prob(action)
         entropies = dist.entropy()
@@ -569,6 +713,4 @@ class DictActorCriticPolicy(ActorCriticPolicy):
 
 
         
-
-
 
