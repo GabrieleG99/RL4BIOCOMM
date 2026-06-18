@@ -1,4 +1,4 @@
-name: EMMCOMMprova
+name: RL4BIOCOMM
 channels:
   - defaults
 dependencies:
