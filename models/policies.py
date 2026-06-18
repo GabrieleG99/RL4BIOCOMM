@@ -27,9 +27,9 @@ class BasePolicy(nn.Module, ABC):
             action_space: spaces.Space,
             observation_space: spaces.Space,
             optim_class: type[optim.Optimizer]=optim.Adam,
-            optim_kwargs: dict[str, Any]=None,
-            features_extractor_class: nn.Module=FeedForwardNN,
-            features_extractor_kwargs: dict[str, Any]= {},
+            optim_kwargs: Optional[dict[str, Any]]=None,
+            features_extractor_class: BaseNN=FeedForwardNN,
+            features_extractor_kwargs: Optional[dict[str, Any]]= None,
             activation: str='relu',
     ):
         super(BasePolicy, self).__init__()
@@ -40,10 +40,16 @@ class BasePolicy(nn.Module, ABC):
         self._set_input_output_sizes()
 
         self.features_extractor_class = features_extractor_class
-        self.features_extractor_kwargs = features_extractor_kwargs
+        if features_extractor_kwargs is None:
+            self.features_extractor_kwargs = {}
+        else:
+            self.features_extractor_kwargs = features_extractor_kwargs
 
         self.optim_class = optim_class
-        self.optim_kwargs = optim_kwargs
+        if optim_kwargs is None:
+            self.optim_kwargs = {}
+        else:
+            self.optim_kwargs = optim_kwargs
 
         self.activation = activation
 
@@ -187,11 +193,11 @@ class ActorCriticPolicy(BasePolicy):
             action_space: spaces.Space,
             observation_space: spaces.Space,
             optim_class: type[optim.Optimizer]=optim.Adam,
-            optim_kwargs: dict[str, Any]=None,
-            features_extractor_class: BaseNN=None,
-            features_extractor_kwargs: dict[str, Any]={},
+            optim_kwargs: Optional[dict[str, Any]]=None,
+            features_extractor_class: BaseNN=FeedForwardNN,
+            features_extractor_kwargs: Optional[dict[str, Any]]=None,
             shared_critic_input_size: Optional[int]=None,
-            net_arch: dict[str, Any]=None,
+            net_arch: Optional[dict[str, Any]]=None,
             activation: str='relu',
             use_popart: bool=False,
             device='cpu'
@@ -588,8 +594,8 @@ class DictActorCriticPolicy(ActorCriticPolicy):
         for key, size in self.output_size.items():
             self.actor_heads[key] = FeedForwardNN(
                 self.act_features_extractor.output_size,
-                self.net_arch['pi'],
                 size,
+                self.net_arch['pi'],
                 activation=self.activation
             )
 
